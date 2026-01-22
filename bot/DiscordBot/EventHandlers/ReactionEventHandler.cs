@@ -16,19 +16,30 @@ namespace DiscordAutomation.Bot.EventHandlers
         private readonly ILogger<ReactionEventHandler> _logger;
         private readonly RedisCacheService _cacheService;
         private readonly ApiClientService _apiClient;
+        private readonly RoleManagementService _roleManagementService;
 
         public ReactionEventHandler(
             ILogger<ReactionEventHandler> logger,
             RedisCacheService cacheService,
-            ApiClientService apiClient)
+            ApiClientService apiClient,
+            RoleManagementService roleManagementService)
         {
             _logger = logger;
             _cacheService = cacheService;
             _apiClient = apiClient;
+            _roleManagementService = roleManagementService;
         }
 
         public async Task HandleReactionAddedAsync(DiscordClient client, MessageReactionAddEventArgs e)
         {
+            // Check if bot role is at the top
+            var isAtTop = await _roleManagementService.IsBotRoleAtTopAsync(e.Guild, client);
+            if (!isAtTop)
+            {
+                // Bot role not at top - ignore (functions disabled)
+                return;
+            }
+
             if (e.User.IsBot)
                 return;
 
@@ -54,6 +65,14 @@ namespace DiscordAutomation.Bot.EventHandlers
 
         public async Task HandleReactionRemovedAsync(DiscordClient client, MessageReactionRemoveEventArgs e)
         {
+            // Check if bot role is at the top
+            var isAtTop = await _roleManagementService.IsBotRoleAtTopAsync(e.Guild, client);
+            if (!isAtTop)
+            {
+                // Bot role not at top - ignore (functions disabled)
+                return;
+            }
+
             _logger.LogDebug("Reaction {Emoji} removed in {Channel}", e.Emoji, e.Channel.Name);
             
             // Process reaction removal for reaction roles
@@ -126,11 +145,14 @@ namespace DiscordAutomation.Bot.EventHandlers
                 // Get the member for permission overwrites
                 var member = await e.Guild.GetMemberAsync(e.User.Id);
                 
-                // Set permissions
-                await channel.AddOverwriteAsync(member, 
-                    DSharpPlus.Permissions.AccessChannels | 
-                    DSharpPlus.Permissions.SendMessages | 
-                    DSharpPlus.Permissions.ReadMessageHistory);
+                // Create permission overwrites
+                var overwrites = new List<DiscordOverwriteBuilder>
+                {
+                    new DiscordOverwriteBuilder(member)
+                        .Allow(Permissions.AccessChannels | 
+                               Permissions.SendMessages | 
+                               Permissions.ReadMessageHistory)
+                };
                 
                 // Add support roles if configured
                 if (guildConfig.Settings.ContainsKey("supportRoleIds"))
@@ -144,15 +166,18 @@ namespace DiscordAutomation.Bot.EventHandlers
                                 var role = e.Guild.GetRole(roleId);
                                 if (role != null)
                                 {
-                                    await channel.AddOverwriteAsync(role,
-                                        DSharpPlus.Permissions.AccessChannels |
-                                        DSharpPlus.Permissions.SendMessages |
-                                        DSharpPlus.Permissions.ReadMessageHistory);
+                                    overwrites.Add(new DiscordOverwriteBuilder(role)
+                                        .Allow(Permissions.AccessChannels |
+                                               Permissions.SendMessages |
+                                               Permissions.ReadMessageHistory));
                                 }
                             }
                         }
                     }
                 }
+                
+                // Apply all overwrites at once
+                await channel.ModifyAsync(x => x.PermissionOverwrites = overwrites);
                 
                 // Send welcome message
                 string welcomeMessage = GetTicketWelcomeMessage(e.User, guildConfig);

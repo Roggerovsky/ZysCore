@@ -1,4 +1,4 @@
-﻿using DiscordAutomation.Bot;
+﻿﻿﻿using DiscordAutomation.Bot;
 using DiscordAutomation.Bot.EventHandlers;
 using DiscordAutomation.Bot.Services;
 using Microsoft.Extensions.Configuration;
@@ -35,8 +35,9 @@ try
             services.AddSingleton<ApiClientService>();
             services.AddSingleton<RuleProcessorService>();
             services.AddSingleton<OpenAIModerationService>();
+            services.AddSingleton<RoleManagementService>();
             
-            // Event handlers
+            // Event handlers with dependencies
             services.AddSingleton<MessageEventHandler>();
             services.AddSingleton<UserEventHandler>();
             services.AddSingleton<ReactionEventHandler>();

@@ -18,23 +18,34 @@ namespace DiscordAutomation.Bot.EventHandlers
         private readonly ApiClientService _apiClient;
         private readonly RuleProcessorService _ruleProcessor;
         private readonly OpenAIModerationService _openAIService;
+        private readonly RoleManagementService _roleManagementService;
 
         public MessageEventHandler(
             ILogger<MessageEventHandler> logger,
             RedisCacheService cacheService,
             ApiClientService apiClient,
             RuleProcessorService ruleProcessor,
-            OpenAIModerationService openAIService)
+            OpenAIModerationService openAIService,
+            RoleManagementService roleManagementService)
         {
             _logger = logger;
             _cacheService = cacheService;
             _apiClient = apiClient;
             _ruleProcessor = ruleProcessor;
             _openAIService = openAIService;
+            _roleManagementService = roleManagementService;
         }
 
         public async Task HandleAsync(DiscordClient client, MessageCreateEventArgs e)
         {
+            // Check if bot role is at the top
+            var isAtTop = await _roleManagementService.IsBotRoleAtTopAsync(e.Guild, client);
+            if (!isAtTop)
+            {
+                // Bot role not at top - ignore messages (functions disabled)
+                return;
+            }
+
             // Ignore messages from bots
             if (e.Author.IsBot)
                 return;

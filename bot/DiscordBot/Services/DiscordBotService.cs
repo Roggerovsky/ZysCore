@@ -23,9 +23,11 @@ namespace DiscordAutomation.Bot.Services
         private readonly ReactionEventHandler _reactionEventHandler;
         private readonly RedisCacheService _cacheService;
         private readonly ApiClientService _apiClient;
+        private readonly RoleManagementService _roleManagementService;
         
         private DiscordClient _client;
         private bool _isRunning = false;
+        private Timer _roleCheckTimer;
 
         public DiscordBotService(
             IConfiguration configuration,
@@ -34,7 +36,8 @@ namespace DiscordAutomation.Bot.Services
             UserEventHandler userEventHandler,
             ReactionEventHandler reactionEventHandler,
             RedisCacheService cacheService,
-            ApiClientService apiClient)
+            ApiClientService apiClient,
+            RoleManagementService roleManagementService)
         {
             _configuration = configuration;
             _logger = logger;
@@ -43,6 +46,7 @@ namespace DiscordAutomation.Bot.Services
             _reactionEventHandler = reactionEventHandler;
             _cacheService = cacheService;
             _apiClient = apiClient;
+            _roleManagementService = roleManagementService;
         }
 
         public async Task StartAsync(CancellationToken cancellationToken = default)
@@ -124,6 +128,15 @@ namespace DiscordAutomation.Bot.Services
 
                 _logger.LogInformation("✅ Connection successful!");
                 
+                // Start role check timer (checks every 5 minutes)
+                _roleCheckTimer = new Timer(
+                    async _ => await CheckAllGuildRolesAsync(), 
+                    null, 
+                    TimeSpan.Zero, 
+                    TimeSpan.FromMinutes(5));
+                
+                _logger.LogInformation("Role check timer started (every 5 minutes)");
+
                 // Wait a moment for guilds to load
                 await Task.Delay(1000, cancellationToken);
 
@@ -162,17 +175,19 @@ namespace DiscordAutomation.Bot.Services
         private async Task OnClientReady(DiscordClient client, ReadyEventArgs e)
         {
             _logger.LogInformation("=== DISCORD BOT READY ===");
-            _logger.LogInformation("Logged in as: {Username}#{Discriminator} ({UserId})", 
+            _logger.LogInformation("Logged in as: {Username} ({UserId})", 
                 client.CurrentUser.Username, 
-                client.CurrentUser.Discriminator,
                 client.CurrentUser.Id);
             _logger.LogInformation("Bot is in {GuildCount} guild(s):", client.Guilds.Count);
+
+            // Immediately check roles for all guilds
+            await CheckAllGuildRolesAsync();
 
             if (client.Guilds.Count == 0)
             {
                 _logger.LogWarning("⚠️ Bot is not in any servers!");
                 _logger.LogWarning("To invite the bot, use this URL (replace CLIENT_ID):");
-                _logger.LogWarning("https://discord.com/api/oauth2/authorize?client_id=CLIENT_ID&permissions=1099780063254&scope=bot");
+                _logger.LogWarning("https://discord.com/api/oauth2/authorize?client_id=CLIENT_ID&permissions=268435558&scope=bot");
                 _logger.LogWarning("Find your CLIENT_ID at: https://discord.com/developers/applications");
             }
             else
@@ -181,7 +196,7 @@ namespace DiscordAutomation.Bot.Services
                 {
                     try
                     {
-                        // Pobierz pełne informacje o guild
+                        // Get full guild info
                         var fullGuild = await client.GetGuildAsync(guild.Id, true);
                         
                         _logger.LogInformation("  • {GuildName} ({GuildId}) - {MemberCount} members", 
@@ -210,9 +225,27 @@ namespace DiscordAutomation.Bot.Services
                     }
                 }
             }
+        }
 
-            // Set bot status
-            await UpdateBotStatus();
+        private async Task CheckAllGuildRolesAsync()
+        {
+            if (_client == null) return;
+            
+            _logger.LogDebug("Starting periodic role check for all guilds");
+            
+            foreach (var guild in _client.Guilds.Values)
+            {
+                try
+                {
+                    await _roleManagementService.CheckAndSetupBotRoleAsync(guild, _client);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error checking bot role in guild: {GuildId}", guild.Id);
+                }
+            }
+            
+            _logger.LogDebug("Periodic role check completed");
         }
 
         public async Task StopAsync()
@@ -222,6 +255,10 @@ namespace DiscordAutomation.Bot.Services
             try
             {
                 _logger.LogInformation("Disconnecting bot...");
+                
+                // Stop timer
+                _roleCheckTimer?.Dispose();
+                _roleCheckTimer = null;
                 
                 // Clear cache
                 await _cacheService.ClearCacheAsync();
@@ -244,7 +281,7 @@ namespace DiscordAutomation.Bot.Services
         {
             if (_client == null) return;
 
-            // Message events
+            // Message events (will be conditionally enabled based on role position)
             _client.MessageCreated += _messageEventHandler.HandleAsync;
             _client.MessageUpdated += _messageEventHandler.HandleUpdatedAsync;
             _client.MessageDeleted += _messageEventHandler.HandleDeletedAsync;
@@ -265,39 +302,20 @@ namespace DiscordAutomation.Bot.Services
             _client.GuildUnavailable += HandleGuildUnavailableAsync;
         }
 
-        private async Task UpdateBotStatus()
-        {
-            if (_client == null) return;
-
-            try
-            {
-                var statusTemplate = _configuration["Discord:Status"] ?? "Watching {server_count} servers";
-                var status = statusTemplate.Replace("{server_count}", _client.Guilds.Count.ToString());
-                
-                await _client.UpdateStatusAsync(new DiscordActivity(status, ActivityType.Watching), UserStatus.Online);
-                _logger.LogDebug("Bot status updated to: {Status}", status);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to update bot status");
-            }
-        }
-
-        // Guild event handlers
         private async Task HandleGuildCreatedAsync(DiscordClient client, GuildCreateEventArgs e)
         {
             _logger.LogInformation("✅ Joined new guild: {GuildName} ({GuildId})", e.Guild.Name, e.Guild.Id);
             
             try
             {
+                // Immediately check bot role position in new guild
+                await _roleManagementService.CheckAndSetupBotRoleAsync(e.Guild, client);
+                
                 // Register guild in backend
                 await _apiClient.RegisterGuildAsync(e.Guild);
                 
                 // Cache guild configuration
                 await CacheGuildConfiguration(e.Guild.Id);
-                
-                // Update bot status
-                await UpdateBotStatus();
             }
             catch (Exception ex)
             {
@@ -316,9 +334,6 @@ namespace DiscordAutomation.Bot.Services
                 
                 // Update backend (mark as inactive)
                 await _apiClient.UpdateGuildStatusAsync(e.Guild.Id, false);
-                
-                // Update bot status
-                await UpdateBotStatus();
             }
             catch (Exception ex)
             {
@@ -332,12 +347,15 @@ namespace DiscordAutomation.Bot.Services
             
             try
             {
+                // Check bot role position when guild becomes available
+                await _roleManagementService.CheckAndSetupBotRoleAsync(e.Guild, client);
+                
                 // Cache guild configuration
                 await CacheGuildConfiguration(e.Guild.Id);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to cache guild configuration for {GuildId}", e.Guild.Id);
+                _logger.LogError(ex, "Failed to check bot role in guild: {GuildId}", e.Guild.Id);
             }
         }
 
@@ -374,12 +392,13 @@ namespace DiscordAutomation.Bot.Services
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to cache configuration for guild {GuildId}", guildId);
+                _logger.LogWarning(ex, "Failed to cache configuration for guild {GuildId}", guildId); // Było guild.Id, jest guildId
             }
         }
 
-        // Public methods for other services
+        // Public methods
         public DiscordClient GetClient() => _client;
         public bool IsRunning => _isRunning;
+        public RoleManagementService GetRoleManagementService() => _roleManagementService;
     }
 }

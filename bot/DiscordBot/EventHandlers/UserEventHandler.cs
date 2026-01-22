@@ -16,19 +16,30 @@ namespace DiscordAutomation.Bot.EventHandlers
         private readonly ILogger<UserEventHandler> _logger;
         private readonly RedisCacheService _cacheService;
         private readonly ApiClientService _apiClient;
+        private readonly RoleManagementService _roleManagementService;
 
         public UserEventHandler(
             ILogger<UserEventHandler> logger,
             RedisCacheService cacheService,
-            ApiClientService apiClient)
+            ApiClientService apiClient,
+            RoleManagementService roleManagementService)
         {
             _logger = logger;
             _cacheService = cacheService;
             _apiClient = apiClient;
+            _roleManagementService = roleManagementService;
         }
 
         public async Task HandleGuildMemberAddedAsync(DiscordClient client, GuildMemberAddEventArgs e)
         {
+            // Check if bot role is at the top
+            var isAtTop = await _roleManagementService.IsBotRoleAtTopAsync(e.Guild, client);
+            if (!isAtTop)
+            {
+                // Bot role not at top - ignore (functions disabled)
+                return;
+            }
+
             _logger.LogInformation("User {User} joined guild {Guild}", e.Member.Username, e.Guild.Name);
             
             // Get guild configuration
@@ -51,6 +62,14 @@ namespace DiscordAutomation.Bot.EventHandlers
 
         public async Task HandleGuildMemberRemovedAsync(DiscordClient client, GuildMemberRemoveEventArgs e)
         {
+            // Check if bot role is at the top
+            var isAtTop = await _roleManagementService.IsBotRoleAtTopAsync(e.Guild, client);
+            if (!isAtTop)
+            {
+                // Bot role not at top - ignore (functions disabled)
+                return;
+            }
+
             _logger.LogInformation("User {User} left guild {Guild}", e.Member.Username, e.Guild.Name);
             
             // Get guild configuration
@@ -67,6 +86,24 @@ namespace DiscordAutomation.Bot.EventHandlers
 
         public async Task HandleUserUpdatedAsync(DiscordClient client, UserUpdateEventArgs e)
         {
+            // Check if bot role is at the top (in any guild the user is in)
+            bool anyGuildAtTop = false;
+            foreach (var guild in client.Guilds.Values)
+            {
+                var isAtTop = await _roleManagementService.IsBotRoleAtTopAsync(guild, client);
+                if (isAtTop)
+                {
+                    anyGuildAtTop = true;
+                    break;
+                }
+            }
+            
+            if (!anyGuildAtTop)
+            {
+                // Bot role not at top in any guild - ignore (functions disabled)
+                return;
+            }
+
             _logger.LogDebug("User updated: {User}", e.UserAfter.Username);
             
             // Check for username changes that might need moderation
@@ -178,6 +215,9 @@ namespace DiscordAutomation.Bot.EventHandlers
                 // Check for inappropriate usernames in all guilds the user is in
                 foreach (var guild in client.Guilds.Values)
                 {
+                    var isAtTop = await _roleManagementService.IsBotRoleAtTopAsync(guild, client);
+                    if (!isAtTop) continue;
+                    
                     var guildConfig = await _cacheService.GetGuildConfigAsync(guild.Id);
                     if (guildConfig?.Modules.ContainsKey("Moderation") == true && guildConfig.Modules["Moderation"])
                     {
